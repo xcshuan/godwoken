@@ -11,7 +11,7 @@ use gw_jsonrpc_types::{
     godwoken::{
         BackendInfo, ErrorTxReceipt, GlobalState, L2BlockCommittedInfo, L2BlockStatus, L2BlockView,
         L2BlockWithStatus, L2TransactionStatus, L2TransactionWithStatus, LastL2BlockCommittedInfo,
-        NodeInfo, RunResult, SUDTFeeConfig, TxReceipt, WithdrawalStatus, WithdrawalWithStatus,
+        NodeInfo, RunResult, SUDTFeeConfig, TxReceipt, WithdrawalStatus, WithdrawalWithStatus, Smtproof,
     },
     test_mode::{ShouldProduceBlock, TestModePayload},
 };
@@ -257,6 +257,7 @@ impl Registry {
             .with_method("gw_get_block_by_number", get_block_by_number)
             .with_method("gw_get_block_committed_info", get_block_committed_info)
             .with_method("gw_get_balance", get_balance)
+            .with_method("gw_get_smt_proof", get_smt_proof)
             .with_method("gw_get_storage_at", get_storage_at)
             .with_method(
                 "gw_get_account_id_by_script_hash",
@@ -1170,6 +1171,77 @@ async fn get_balance(
         }
     };
     Ok(balance.into())
+}
+
+// account_id, key, block_number
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(untagged)]
+enum GetSmtProofParams {
+    Tip((AccountID, Vec<JsonH256>)),
+    Number((AccountID, Vec<JsonH256>, Option<GwUint64>)),
+}
+
+async fn get_smt_proof(
+    Params(params): Params<GetSmtProofParams>,
+    store: Data<Store>,
+    mem_pool_state: Data<Arc<MemPoolState>>,
+) -> Result<Smtproof, RpcError> {
+    let (account_id, keys, block_number) = match params {
+        GetSmtProofParams::Tip(p) => (p.0, p.1, None),
+        GetSmtProofParams::Number(p) => p,
+    };
+    let res = match block_number {
+        Some(block_number) => {
+            let db = store.begin_transaction();
+            let tree = db.state_tree(StateContext::ReadOnlyHistory(block_number.into()))?;
+            let mut values = Vec::with_capacity(keys.len());
+            let smt_keys: Vec<H256> = keys.into_iter().map(|key| to_h256(key)).collect();
+            let mut smt_leaves = Vec::with_capacity(smt_keys.len());
+            for key in smt_keys.iter() {
+                let smt_value = tree.get_value(account_id.into(), key)?;
+                smt_leaves.push((key.clone(), smt_value.clone()));
+
+                values.push(to_jsonh256(smt_value));
+            }
+
+            let smt_proof = tree.tree.merkle_proof(smt_keys)?;
+            let compiled_smt_proof = smt_proof.compile(smt_leaves)?;
+            let proof_bytes: Vec<u8> = compiled_smt_proof.into();
+            let proof_json_bytes = JsonBytes::from_vec(proof_bytes);
+            let account = tree.get_merkle_state();
+            Smtproof {
+                account: account.into(),
+                proof: proof_json_bytes,
+                values,
+            }
+        }
+        None => {
+            let snap = mem_pool_state.load();
+            let tree = snap.state()?;
+            let mut values = Vec::with_capacity(keys.len());
+            let smt_keys: Vec<H256> = keys.into_iter().map(|key| to_h256(key)).collect();
+            let mut smt_leaves = Vec::with_capacity(smt_keys.len());
+            for key in smt_keys.iter() {
+                let smt_value = tree.get_value(account_id.into(), key)?;
+                smt_leaves.push((key.clone(), smt_value.clone()));
+
+                values.push(to_jsonh256(smt_value));
+            }
+
+            let smt_proof = tree.tree.merkle_proof(smt_keys)?;
+            let compiled_smt_proof = smt_proof.compile(smt_leaves)?;
+            let proof_bytes: Vec<u8> = compiled_smt_proof.into();
+            let proof_json_bytes = JsonBytes::from_vec(proof_bytes);
+            let account = tree.get_merkle_state();
+            Smtproof {
+                account: account.into(),
+                proof: proof_json_bytes,
+                values,
+            }
+        }
+    };
+
+    Ok(res)
 }
 
 // account_id, key, block_number

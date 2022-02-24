@@ -24,7 +24,7 @@ pub enum StateContext {
 }
 
 pub struct StateTree<'a> {
-    tree: SMT<SMTStore<'a, StoreTransaction>>,
+    pub tree: SMT<SMTStore<'a, StoreTransaction>>,
     account_count: u32,
     context: StateContext,
 }

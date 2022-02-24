@@ -1159,3 +1159,11 @@ impl From<packed::WithdrawalLockArgs> for WithdrawalLockArgs {
         }
     }
 }
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Debug, Default)]
+#[serde(rename_all = "snake_case")]
+pub struct Smtproof {
+    pub account: AccountMerkleState,
+    pub proof: JsonBytes,
+    pub values: Vec<H256>,
+}

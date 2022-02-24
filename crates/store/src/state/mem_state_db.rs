@@ -16,7 +16,7 @@ use gw_types::{
 use super::state_tracker::StateTracker;
 
 pub struct MemStateTree<'a> {
-    tree: SMT<SMTStore<'a, MemStore>>,
+    pub tree: SMT<SMTStore<'a, MemStore>>,
     account_count: u32,
     tracker: StateTracker,
 }

@@ -1,7 +1,12 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use ckb_types::prelude::{Builder, Entity};
-use gw_common::{blake2b::new_blake2b, state::State, H256};
+use gw_common::{
+    blake2b::new_blake2b,
+    smt::Blake2bHasher,
+    state::{build_account_key, State},
+    H256,
+};
 use gw_config::{FeeConfig, MemPoolConfig, NodeMode, RPCMethods, RPCRateLimit, RPCServerConfig};
 use gw_dynamic_config::manager::{DynamicConfigManager, DynamicConfigReloadResponse};
 use gw_generator::{error::TransactionError, sudt::build_l2_sudt_script, ArcSwap, Generator};
@@ -9,9 +14,10 @@ use gw_jsonrpc_types::{
     blockchain::Script,
     ckb_jsonrpc_types::{JsonBytes, Uint128, Uint32},
     godwoken::{
-        BackendInfo, ErrorTxReceipt, GlobalState, L2BlockCommittedInfo, L2BlockStatus, L2BlockView,
-        L2BlockWithStatus, L2TransactionStatus, L2TransactionWithStatus, LastL2BlockCommittedInfo,
-        NodeInfo, RunResult, SUDTFeeConfig, TxReceipt, WithdrawalStatus, WithdrawalWithStatus, Smtproof,
+        AccountMerkleState, BackendInfo, ErrorTxReceipt, GlobalState, L2BlockCommittedInfo,
+        L2BlockStatus, L2BlockView, L2BlockWithStatus, L2TransactionStatus,
+        L2TransactionWithStatus, LastL2BlockCommittedInfo, NodeInfo, RunResult, SUDTFeeConfig,
+        Smtproof, TxReceipt, WithdrawalStatus, WithdrawalWithStatus,
     },
     test_mode::{ShouldProduceBlock, TestModePayload},
 };
@@ -1194,49 +1200,75 @@ async fn get_smt_proof(
         Some(block_number) => {
             let db = store.begin_transaction();
             let tree = db.state_tree(StateContext::ReadOnlyHistory(block_number.into()))?;
-            let mut values = Vec::with_capacity(keys.len());
-            let smt_keys: Vec<H256> = keys.into_iter().map(|key| to_h256(key)).collect();
+            let smt_keys: Vec<H256> = keys
+                .into_iter()
+                .map(|key| build_account_key(account_id.into(), key.as_bytes()))
+                .collect();
+            let mut smt_values = Vec::with_capacity(smt_keys.len());
             let mut smt_leaves = Vec::with_capacity(smt_keys.len());
-            for key in smt_keys.iter() {
-                let smt_value = tree.get_value(account_id.into(), key)?;
-                smt_leaves.push((key.clone(), smt_value.clone()));
+            for smt_key in smt_keys.iter() {
+                let smt_value = tree.get_raw(smt_key)?;
+                smt_leaves.push((smt_key.clone(), smt_value.clone()));
 
-                values.push(to_jsonh256(smt_value));
+                smt_values.push(to_jsonh256(smt_value));
             }
 
             let smt_proof = tree.tree.merkle_proof(smt_keys)?;
-            let compiled_smt_proof = smt_proof.compile(smt_leaves)?;
-            let proof_bytes: Vec<u8> = compiled_smt_proof.into();
+            let compiled_smt_proof = smt_proof.compile(smt_leaves.clone())?;
+            let proof_bytes: Vec<u8> = compiled_smt_proof.clone().into();
             let proof_json_bytes = JsonBytes::from_vec(proof_bytes);
-            let account = tree.get_merkle_state();
+            let account: AccountMerkleState = tree.get_merkle_state().into();
+
+            let res = compiled_smt_proof
+                .verify::<Blake2bHasher>(&to_h256(account.merkle_root.clone()), smt_leaves);
+            match res {
+                Err(err) => {
+                    log::info!("smt proof verify error: {}", err);
+                }
+                _ => {}
+            }
+
             Smtproof {
-                account: account.into(),
+                account,
                 proof: proof_json_bytes,
-                values,
+                values: smt_values,
             }
         }
         None => {
             let snap = mem_pool_state.load();
             let tree = snap.state()?;
-            let mut values = Vec::with_capacity(keys.len());
-            let smt_keys: Vec<H256> = keys.into_iter().map(|key| to_h256(key)).collect();
+            let smt_keys: Vec<H256> = keys
+                .into_iter()
+                .map(|key| build_account_key(account_id.into(), key.as_bytes()))
+                .collect();
+            let mut smt_values = Vec::with_capacity(smt_keys.len());
             let mut smt_leaves = Vec::with_capacity(smt_keys.len());
-            for key in smt_keys.iter() {
-                let smt_value = tree.get_value(account_id.into(), key)?;
-                smt_leaves.push((key.clone(), smt_value.clone()));
+            for smt_key in smt_keys.iter() {
+                let smt_value = tree.get_raw(smt_key)?;
+                smt_leaves.push((smt_key.clone(), smt_value.clone()));
 
-                values.push(to_jsonh256(smt_value));
+                smt_values.push(to_jsonh256(smt_value));
             }
 
             let smt_proof = tree.tree.merkle_proof(smt_keys)?;
-            let compiled_smt_proof = smt_proof.compile(smt_leaves)?;
-            let proof_bytes: Vec<u8> = compiled_smt_proof.into();
+            let compiled_smt_proof = smt_proof.compile(smt_leaves.clone())?;
+            let proof_bytes: Vec<u8> = compiled_smt_proof.clone().into();
             let proof_json_bytes = JsonBytes::from_vec(proof_bytes);
-            let account = tree.get_merkle_state();
+            let account: AccountMerkleState = tree.get_merkle_state().into();
+
+            let res = compiled_smt_proof
+                .verify::<Blake2bHasher>(&to_h256(account.merkle_root.clone()), smt_leaves);
+            match res {
+                Err(err) => {
+                    log::info!("smt proof verify error: {}", err);
+                }
+                _ => {}
+            }
+
             Smtproof {
-                account: account.into(),
+                account,
                 proof: proof_json_bytes,
-                values,
+                values: smt_values,
             }
         }
     };
